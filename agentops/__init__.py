@@ -3,12 +3,15 @@ import functools
 import os
 import logging
 from typing import Optional, List, Union
+from uuid import UUID
+
 from .client import Client
-from .config import Configuration
+from .config import ClientConfiguration
 from .event import Event, ActionEvent, LLMEvent, ToolEvent, ErrorEvent
 from .decorators import record_function
 from .agent import track_agent
 from .log_config import logger
+from .session import Session
 
 try:
     from .partners.langchain_callback_handler import (
@@ -43,12 +46,11 @@ def init(
     max_wait_time: Optional[int] = None,
     max_queue_size: Optional[int] = None,
     tags: Optional[List[str]] = None,
-    override: Optional[bool] = None,  # Deprecated
     instrument_llm_calls=True,
     auto_start_session=True,
     inherited_session_id: Optional[str] = None,
     skip_auto_end_session: Optional[bool] = False,
-):
+) -> Union[str, None]:
     """
     Initializes the AgentOps singleton pattern.
 
@@ -65,7 +67,6 @@ def init(
         max_queue_size (int, optional): The maximum size of the event queue. Defaults to 100.
         tags (List[str], optional): Tags for the sessions that can be used for grouping or
             sorting later (e.g. ["GPT-4"]).
-        override (bool, optional): [Deprecated] Use `instrument_llm_calls` instead. Whether to instrument LLM calls and emit LLMEvents..
         instrument_llm_calls (bool): Whether to instrument LLM calls and emit LLMEvents..
         auto_start_session (bool): Whether to start a session automatically when the client is created.
         inherited_session_id (optional, str): Init Agentops with an existing Session
@@ -89,17 +90,22 @@ def init(
         max_wait_time=max_wait_time,
         max_queue_size=max_queue_size,
         tags=tags,
-        override=override,
         instrument_llm_calls=instrument_llm_calls,
-        auto_start_session=auto_start_session,
+        auto_start_session=False,
         inherited_session_id=inherited_session_id,
         skip_auto_end_session=skip_auto_end_session,
     )
 
+    session = None
+    if auto_start_session:
+        session = c.start_session(
+            tags=tags, config=c.config, inherited_session_id=inherited_session_id
+        )
+
     global is_initialized
     is_initialized = True
 
-    return inherited_session_id or c.current_session_id
+    return session
 
 
 def end_session(
@@ -107,6 +113,7 @@ def end_session(
     end_state_reason: Optional[str] = None,
     video: Optional[str] = None,
     is_auto_end: Optional[bool] = False,
+    session_id: Optional[str] = None,
 ):
     """
     End the current session with the AgentOps service.
@@ -116,6 +123,7 @@ def end_session(
         end_state_reason (str, optional): The reason for ending the session.
         video (str, optional): URL to a video recording of the session
         is_auto_end (bool, optional): is this an automatic use of end_session and should be skipped with bypass_auto_end_session
+        session_id (str, optional): the session to end, if using multiple concurrent sessions
     """
     Client().end_session(
         end_state=end_state,
@@ -125,18 +133,25 @@ def end_session(
     )
 
 
+# Mostly used for unit testing -
+# prevents unexpected sessions on new tests
+def end_all_sessions() -> None:
+    return Client().end_all_sessions()
+
+
 def start_session(
     tags: Optional[List[str]] = None,
-    config: Optional[Configuration] = None,
+    config: Optional[ClientConfiguration] = None,
     inherited_session_id: Optional[str] = None,
-):
+) -> Union[Session, None]:
     """
     Start a new session for recording events.
 
     Args:
         tags (List[str], optional): Tags that can be used for grouping or sorting later.
             e.g. ["test_run"].
-        config: (Configuration, optional): Client configuration object
+        config: (Configuration, optional): Client configuration object,
+        inherited_session_id: (str, optional): Set the session ID to inherit from another client
     """
 
     try:
@@ -161,18 +176,17 @@ def record(event: Union[Event, ErrorEvent]):
     Client().record(event)
 
 
-@check_init
 def add_tags(tags: List[str]):
     """
     Append to session tags at runtime.
 
     Args:
         tags (List[str]): The list of tags to append.
+        session_id (str, optional): which session to add tags to if using multiple concurrent sessions
     """
     Client().add_tags(tags)
 
 
-@check_init
 def set_tags(tags: List[str]):
     """
     Replace session tags at runtime.
